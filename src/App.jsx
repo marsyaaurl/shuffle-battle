@@ -6,15 +6,6 @@ import Aurora from "./assets/Aurora";
 const CLIENT_ID = import.meta.env.VITE_SPOTIFY_CLIENT_ID;
 const CLIENT_SECRET = import.meta.env.VITE_SPOTIFY_CLIENT_SECRET;
 
-const categoryMapping = {
-  Sadder: "valence", // Lower valence = sadder
-  Happier: "valence", // Higher valence = happier
-  Energetic: "energy",
-  Danceable: "danceability",
-  Louder: "loudness",
-  Alive: "liveness",
-};
-
 let token = null;
 let tokenExpirationTime = null;
 
@@ -46,6 +37,27 @@ const getToken = async () => {
   }
 };
 
+const getPlaylistInfo = async (playlistId) => {
+  try {
+    const token = await getToken();
+    const response = await axios.get(
+      `https://api.spotify.com/v1/playlists/${playlistId}`,
+      { headers: { Authorization: `Bearer ${token}` } }
+    );
+    console.log("Playlist Info Response:", response.data); // Logging untuk debugging
+    const playlistName = response.data.name;
+    const playlistImage = response.data.images[0]?.url || ""; // Perbaikan di sini
+
+    return {
+      name: playlistName,
+      image: playlistImage,
+    };
+  } catch (error) {
+    console.error("Error fetching playlist info:", error);
+    throw new Error("Failed to fetch playlist info");
+  }
+};
+
 const getPlaylistTracks = async (playlistId) => {
   try {
     const token = await getToken();
@@ -59,69 +71,48 @@ const getPlaylistTracks = async (playlistId) => {
       throw new Error("No tracks found in the playlist");
     }
 
-    return response.data.items.map((item) => item.track.id).filter(Boolean);
+    const tracks = response.data.items
+      .filter(item => item.track && item.track.id)
+      .map(item => ({
+        id: item.track.id,
+        popularity: item.track.popularity || 0,
+      }));
+
+    return tracks;
   } catch (error) {
     console.error("Error fetching playlist:", error);
     throw new Error("Failed to fetch playlist data");
   }
 };
 
-const getAudioFeatures = async (trackIds) => {
-  try {
-    const token = await getToken();
-    const validTrackIds = trackIds.filter(id => id && id.length === 22); // Pastikan ID track valid
-    if (validTrackIds.length === 0) {
-      throw new Error("No valid track IDs found");
-    }
-
-    const response = await axios.get(
-      `https://api.spotify.com/v1/audio-features?ids=${validTrackIds.join(",")}`,
-      { headers: { Authorization: `Bearer ${token}` } }
-    );
-
-    console.log("Audio Features Response:", response.data);
-    if (!response.data.audio_features || response.data.audio_features.length === 0) {
-      throw new Error("No audio features found");
-    }
-
-    return response.data.audio_features;
-  } catch (error) {
-    if (error.response && error.response.status === 429) {
-      console.error("Rate limit exceeded. Please try again later.");
-    } else {
-      console.error("Error fetching audio features:", error);
-    }
-    throw new Error("Failed to fetch audio features");
-  }
+const calculateAveragePopularity = (tracks) => {
+  if (tracks.length === 0) return 0;
+  const totalPopularity = tracks.reduce((sum, track) => sum + (track.popularity || 0), 0);
+  return totalPopularity / tracks.length;
 };
 
-const determineWinner = async (playlist1Id, playlist2Id, category) => {
-  const featureKey = categoryMapping[category];
-  if (!featureKey) return "Invalid category";
-
+const determineWinner = async (playlist1Id, playlist2Id) => {
   try {
     const tracks1 = await getPlaylistTracks(playlist1Id);
     const tracks2 = await getPlaylistTracks(playlist2Id);
 
+    const info1 = await getPlaylistInfo(playlist1Id);
+    const info2 = await getPlaylistInfo(playlist2Id);
+
     if (tracks1.length === 0 || tracks2.length === 0) {
-      return "One of the playlists has no tracks.";
+      throw new Error("One of the playlists has no tracks.");
     }
 
-    const audioFeatures1 = await getAudioFeatures(tracks1);
-    const audioFeatures2 = await getAudioFeatures(tracks2);
-
-    if (!audioFeatures1 || !audioFeatures2) {
-      throw new Error("Failed to fetch audio features");
-    }
-
-    const avgFeature1 = audioFeatures1.reduce((sum, track) => sum + (track[featureKey] || 0), 0) / audioFeatures1.length;
-const avgFeature2 = audioFeatures2.reduce((sum, track) => sum + (track[featureKey] || 0), 0) / audioFeatures2.length;
+    const avgPopularity1 = calculateAveragePopularity(tracks1);
+    const avgPopularity2 = calculateAveragePopularity(tracks2);
 
     let winner;
-    if (category === "Sadder") {
-      winner = avgFeature1 < avgFeature2 ? "Playlist 1 is sadder" : "Playlist 2 is sadder";
+    if (avgPopularity1 > avgPopularity2) {
+      winner = { ...info2, message: `${info2.name} is more underground, smell some good taste in there!` };
+    } else if (avgPopularity1 < avgPopularity2) {
+      winner = { ...info1, message: `${info1.name} is more underground, smell some good taste in there!` };
     } else {
-      winner = avgFeature1 > avgFeature2 ? `Playlist 1 is more ${category.toLowerCase()}` : `Playlist 2 is more ${category.toLowerCase()}`;
+      winner = { message: "Both playlists are equally underground!" };
     }
 
     return winner;
@@ -134,57 +125,50 @@ const avgFeature2 = audioFeatures2.reduce((sum, track) => sum + (track[featureKe
 function App() {
   const [playlist1, setPlaylist1] = useState("");
   const [playlist2, setPlaylist2] = useState("");
-  const [category, setCategory] = useState("");
-  const [result, setResult] = useState("");
-
+  const [result, setResult] = useState({ message: "", image: "", name: "" }); // Perbaikan di sini
   const [isLoading, setIsLoading] = useState(false);
 
   const handleSubmit = async (e) => {
     e.preventDefault();
-    setResult("Calculating...");
+    setResult({ message: "Calculating...", image: "", name: "" }); // Reset result
     setIsLoading(true);
-  
-    if (!playlist1 || !playlist2 || !category) {
-      setResult("Please fill in all fields!");
+
+    if (!playlist1 || !playlist2) {
+      setResult({ message: "Please fill in all fields!", image: "", name: "" });
       setIsLoading(false);
       return;
     }
-  
+
     const extractPlaylistId = (url) => {
-      const match = url.match(/playlist\/([a-zA-Z0-9]{22})/); // Pastikan ID playlist valid
+      const match = url.match(/playlist\/([a-zA-Z0-9]{22})/);
       if (!match) {
         console.error("Invalid playlist URL:", url);
         return null;
       }
       return match[1];
     };
-  
+
     const playlist1Id = extractPlaylistId(playlist1);
     const playlist2Id = extractPlaylistId(playlist2);
-  
+
     console.log("Playlist 1 ID:", playlist1Id);
     console.log("Playlist 2 ID:", playlist2Id);
-  
+
     if (!playlist1Id || !playlist2Id) {
-      setResult("Invalid playlist link!");
+      setResult({ message: "Invalid playlist link!", image: "", name: "" });
       setIsLoading(false);
       return;
     }
-  
+
     try {
-      const winner = await determineWinner(playlist1Id, playlist2Id, category);
+      const winner = await determineWinner(playlist1Id, playlist2Id);
       setResult(winner);
     } catch (error) {
       console.error("Error in handleSubmit:", error);
-      setResult("Error fetching playlist data!");
+      setResult({ message: "Error fetching playlist data!", image: "", name: "" });
     } finally {
       setIsLoading(false);
     }
-    console.log("Playlist 1 ID:", playlist1Id);
-    console.log("Playlist 2 ID:", playlist2Id);
-    console.log("Playlist Tracks Response:", response.data);
-    console.log("Audio Features Response:", response.data);
-    console.error("Error:", error);
   };
 
   return (
@@ -195,18 +179,33 @@ function App() {
       <div className="relative flex flex-col items-center justify-center h-screen gap-3 z-10">
         <h1 className="font-extrabold text-5xl text-white">Shuffle Battle</h1>
         <form onSubmit={handleSubmit} className="flex flex-col items-center gap-2">
-          <input type="text" placeholder="Enter Playlist Link" value={playlist1} onChange={(e) => setPlaylist1(e.target.value)} className="bg-[#323232] rounded-md border-[#d9d9d9] w-56 h-8 p-2 text-sm font-extralight text-white" />
+          <input
+            type="text"
+            placeholder="Enter Playlist Link"
+            value={playlist1}
+            onChange={(e) => setPlaylist1(e.target.value)}
+            className="bg-[#323232] rounded-md border-[#d9d9d9] w-56 h-8 p-2 text-sm font-extralight text-white"
+          />
           <h2 className="font-extrabold text-white text-md">VS</h2>
-          <input type="text" placeholder="Enter Playlist Link" value={playlist2} onChange={(e) => setPlaylist2(e.target.value)} className="bg-[#323232] rounded-md border-[#d9d9d9] w-56 h87 p-2 text-sm font-extralight text-white" />
-          <select value={category} onChange={(e) => setCategory(e.target.value)} className="bg-[#323232] rounded-md border-[#d9d9d9] w-56 h-8 px-2 text-sm font-medium text-white">
-            <option value="">Choose Category</option>
-            {Object.keys(categoryMapping).map((cat) => (
-              <option key={cat} value={cat}>{cat}</option>
-            ))}
-          </select>
+          <input
+            type="text"
+            placeholder="Enter Playlist Link"
+            value={playlist2}
+            onChange={(e) => setPlaylist2(e.target.value)}
+            className="bg-[#323232] rounded-md border-[#d9d9d9] w-56 h-8 p-2 text-sm font-extralight text-white"
+          />
           <button type="submit" className="bg-[#1DB954] rounded-md w-56 h-8 text-md font-bold text-white">Battle</button>
         </form>
-        {result && <div className="text-white font-bold text-lg mt-3">{result}</div>}
+
+        {/* Tampilkan info playlist yang menang */}
+        {result.message && (
+          <div className="text-center mt-4">
+            {result.image && (
+              <img src={result.image} alt="Winner Playlist Cover" className="w-24 h-24 rounded-lg mx-auto" />
+            )}
+            <p className="text-white font-bold mt-2">{result.message}</p>
+          </div>
+        )}
       </div>
     </>
   );
